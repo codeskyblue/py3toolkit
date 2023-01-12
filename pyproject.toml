@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "py3toolkit"
-version = "0.1.0"
+version = "0.1.2"
 description = "my python3 toolkit for daily use"
 authors = ["codeskyblue <codeskyblue@gmail.com>"]
 license = "MIT"
