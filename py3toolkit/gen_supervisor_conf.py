@@ -94,16 +94,17 @@ class Program(_BaseDataClass):
 @dataclass
 class Group(_BaseDataClass):
     programs: typing.List[Program]
-    group: str = None
+    group: typing.Optional[str] = None
     path: str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     # priority: int = 999
 
 
 JINJA_TEMPLATE = """
 {% for group in groups %}
+{% if group.group %}
 [group:{{group.group}}]
 programs={{ group.programs | join(",", attribute="name") }}
-
+{% endif %}
 {% for program in group.programs %}
 [program:{{program.name}}]
 command={{program.command}}
@@ -125,7 +126,7 @@ process_name=%(program_name)s_%(process_num)02d
 {% endfor %}
 """
 
-def main():
+def guess_config_path() -> pathlib.Path:
     valid_name = ("supervisor", "supervisor-conf")
     valid_ext = (".yml", ".yaml")
     valid_names = []
@@ -133,14 +134,21 @@ def main():
         for ext in valid_ext:
             valid_names.append(name+ext)
 
-    p: pathlib.Path = None
     for guess_path in valid_names:
-        _p = pathlib.Path(guess_path)
-        if _p.exists():
-            p = _p
-            break
-    if not p:
-        raise RuntimeError("No valid conf file found", valid_names)
+        p = pathlib.Path(guess_path)
+        if p.exists():
+            return p
+    raise RuntimeError("No valid conf file found", valid_names)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config", type=pathlib.Path, help="config file")
+    args = parser.parse_args()
+
+    p: pathlib.Path = args.config
+    if p is None:
+        guess_config_path()
 
     with p.open("rb") as f:
         data = yaml.load(f, yaml.SafeLoader)

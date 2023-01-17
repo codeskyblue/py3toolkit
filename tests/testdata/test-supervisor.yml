@@ -1,0 +1,5 @@
+- programs:
+  - name: threebody
+    command: echo the world is belong to threebody
+  - name: groundfire
+    command: ./fire.py

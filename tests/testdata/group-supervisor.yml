@@ -1,0 +1,6 @@
+- group: foo
+  programs:
+    - name: bar
+      command: echo bar
+    - name: ai
+      command: sleep 1
