@@ -18,6 +18,7 @@ prompt_toolkit = "*"
 
 [tool.poetry.scripts]
 gen_supervisor_conf = "py3toolkit.gen_supervisor_conf:main"
+sshw.py = "py3toolkit.sshw:main"
 
 [tool.poetry.dev-dependencies]
 pytest = "^7.2.0"

@@ -10,8 +10,15 @@ Refs:
 - sshpass in python https://gist.github.com/jlinoff/bdd346ffadc226337949
 """
 
+import argparse
 import dataclasses
+import fcntl
 import pathlib
+import pty
+import signal
+import struct
+import termios
+import time
 import typing
 from dataclasses import dataclass
 
@@ -19,16 +26,16 @@ import yaml
 from dataclasses_json import DataClassJsonMixin
 from dataclasses_json import config as dconfig
 from marshmallow import fields
+from pexpect import pxssh
 from prompt_toolkit import HTML, Application, print_formatted_text
-from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import VerticalAlign
 from prompt_toolkit.layout.containers import HSplit, Window
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.styles import Style
 
+__version__ = "0.1.0"
 
 def make_field(field_name: str = None,
                mm_field=None,
@@ -46,6 +53,34 @@ def password_decorder(value: typing.Union[str, int]) -> typing.Optional[str]:
     return str(value)
 
 
+def get_console_winsize():
+    '''
+    Get the console winsize.
+    '''
+    for fdn in [pty.STDIN_FILENO, pty.STDOUT_FILENO]:
+        try:
+            packed_data = struct.pack('HHHH', 0, 0, 0, 0)
+            packed_winsize = fcntl.ioctl(fdn, termios.TIOCGWINSZ, packed_data)
+            winsize = struct.unpack('HHHH', packed_winsize)
+            return winsize[0], winsize[1]
+        except IOError:
+            pass
+    return None
+
+
+def update_window_size(child):
+    """Sync window size to child process"""
+    winsize = get_console_winsize()
+    if winsize:
+        rows, cols = winsize
+        child.setwinsize(rows, cols)
+
+@dataclass
+class CallbackShell(DataClassJsonMixin):
+    cmd: str
+    delay: typing.Optional[int] = 0
+
+
 @dataclass
 class HostConfig(DataClassJsonMixin):
     name: str
@@ -53,19 +88,93 @@ class HostConfig(DataClassJsonMixin):
     host: typing.Optional[str] = None
     user: typing.Optional[str] = None
     keypath: typing.Optional[str] = None
-    password: typing.Optional[typing.Union[str, int]] = make_field(decorder=password_decorder, default=None)
-    callback_shells: typing.Optional[typing.List[dict]] = make_field(field_name="callback-shells", default=None)
+    password: typing.Optional[str] = make_field(decorder=password_decorder, default=None)
+    callback_shells: typing.Optional[typing.List[CallbackShell]] = make_field(field_name="callback-shells", default=None)
     children: typing.Optional[typing.List["HostConfig"]] = make_field(mm_field=fields.Field(), default=None)
+    gateway: typing.Optional["HostConfig"] = make_field(mm_field=fields.Field(), default=None)
 
-    def build_ssh_cmd(self) -> typing.List[str]:
+    def build_cmdargs(self) -> typing.List[str]:
         cmds = ["ssh"]
         if self.port != 22:
             cmds.extend(["-p", str(self.port)])
+        if self.keypath:
+            cmds.extend(["-i", self.keypath])
         cmds.extend([f"{self.user}@{self.host}"])
-        if self.password:
-            cmds = ["sshpass", "-p", self.password] + cmds
         return cmds
+
+    def spawn_ssh(self):
+        # https://pexpect.readthedocs.io/en/stable/api/pxssh.html
+        if self.gateway:
+            s = spawn_ssh(self.gateway, reset_prompt=True)
+            s.prompt()
+            s = spawn_ssh(self, is_local=False, ssh_client=s)
+            s.sendline()
+
+            def output_filter(line):
+                if line.endswith(b'[PEXPECT]$ '): # quit when back to gateway server
+                    s.close()
+                    return b""
+                return line
+
+            s.interact(output_filter=output_filter)
+            print_formatted_text(HTML("<gray>END OF INTERACT</gray>"))
+        else:
+            s = spawn_ssh(self)
+            s.interact()
+
+
+def spawn_ssh(host_config: HostConfig, is_local: bool = True, ssh_client: pxssh.pxssh = None, reset_prompt: bool = None) -> pxssh.pxssh:
+    # https://pexpect.readthedocs.io/en/stable/api/pxssh.html
+    cmdargs = host_config.build_cmdargs()
+    cmdline = " ".join(cmdargs)
+    print_formatted_text(HTML(f"<name>{host_config.name}</name> {cmdline}"), style=style)
         
+    s = ssh_client or pxssh.pxssh(ignore_sighup=False)
+    keypath = None
+    if host_config.keypath:
+        keypath = pathlib.Path(host_config.keypath).expanduser()
+        if keypath.stat().st_mode & 0o077 != 0:
+            print("Warning: keypath mode change to 0600")
+            keypath.chmod(0o600)
+
+    s.SSH_OPTS += " -o StrictHostKeyChecking=no"
+    if reset_prompt is None:
+        reset_prompt = False
+
+    if is_local:
+        s.login(host_config.host,
+                username=host_config.user,
+                password=host_config.password,
+                port=host_config.port,
+                ssh_key=keypath,
+                quiet=False,
+                sync_original_prompt=False,
+                auto_prompt_reset=reset_prompt)
+    else:
+        s.login(host_config.host,
+                username=host_config.user,
+                password=host_config.password,
+                port=host_config.port,
+                ssh_key=keypath,
+                quiet=False,
+                auto_prompt_reset=False,
+                spawn_local_ssh=False)
+
+    if is_local:
+        def sigwinch_passthrough(sig, data):
+            p = s.ptyproc
+            if not p.closed:
+                update_window_size(p)
+
+        signal.signal(signal.SIGWINCH, sigwinch_passthrough)
+        update_window_size(s.ptyproc)
+
+    for shell in host_config.callback_shells or []:
+        if shell.delay:
+            time.sleep(shell.delay)
+        s.sendline(shell.cmd)
+    return s
+
 
 # The style sheet.
 style = Style.from_dict({
@@ -86,8 +195,6 @@ def exit_(event: KeyPressEvent):
     interface and return this value from the `Application.run()` call.
     """
     event.app.exit()
-
-host_names = ["root@20220122", "pi@raspberry", "dummy"]
 
 class SelectContainer(HSplit):
     def __init__(self, host_configs: typing.List[HostConfig]):
@@ -144,41 +251,27 @@ class SelectContainer(HSplit):
             kb.add(key)(self._down_hook)
         kb.add(Keys.Enter)(self._enter_hook)
 
-buffer1 = Buffer()  # Editable buffer.
 
-
-mymac = HostConfig(name="mymac", user="codeskyblue", host="127.0.0.1")
-pc001 = HostConfig(name="pc001", user="anonymous", host="example.com")
-pc002 = HostConfig(name="pc002", user="kitty", host="kitty.example.com")
-
-test_config = """
-- name: mymac
-  password: hahaha
-  children:
-    - name: pc001
-      user: anonymous
-      host: example.com
-    - name: pc002
-      user: kitty
-      password: 123123
-      host: kitty.example.com
-      callback-shells:
-      - {cmd: "echo hello world"}
-"""
-
-def load_config() -> typing.List[HostConfig]:
+def load_config(*files: typing.List[str]) -> typing.List[HostConfig]:
     p = pathlib.Path("~/.sshw.yml").expanduser()
-    # return HostConfig.schema().load(yaml.safe_load(p.read_bytes()), many=True)
-    return HostConfig.schema().load(yaml.safe_load(test_config), many=True)
+    return HostConfig.schema().load(yaml.safe_load(p.read_bytes()), many=True)
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--version", action="store_true")
+    args = parser.parse_args()
+    if args.version:
+        print(__version__)
+        return
+
     host_configs = load_config()
     hosts_container = SelectContainer(host_configs) #[mymac, pc001, pc002])
     hosts_container.register_key_bindings(kb)
 
+    # <gray>Use the arrow keys to navigate: ↓ ↑ → ←  and / toggles search</gray>
     root_container = HSplit([
-        Window(content=FormattedTextControl(HTML('<gray>Use the arrow keys to navigate: ↓ ↑ → ←  and / toggles search</gray>')), height=1),
+        Window(content=FormattedTextControl(HTML('<gray>Use the arrow keys to navigate (support vim style): ↓ ↑ </gray>')), height=1),
         Window(content=FormattedTextControl(HTML('<lightgreen>✨ Select host</lightgreen>')), height=1),
         hosts_container,
     ])
@@ -186,17 +279,9 @@ def main():
     layout = Layout(root_container)
 
     app = Application(layout=layout, style=style, key_bindings=kb, full_screen=True)
-    host_config = app.run()
+    host_config: HostConfig = app.run()
     if host_config:
-        print(host_config)
-        cmds = ["ssh"]
-        if host_config.port != 22:
-            cmds.extend(["-p", str(host_config.port)])
-        cmds.extend([f"{host_config.user}@{host_config.host}"])
-        if host_config.password:
-            cmds = ["sshpass", "-p", host_config.password] + cmds
-        print(cmds)
-        print(" ".join(cmds))
+        host_config.spawn_ssh()
 
 
 if __name__ == '__main__':
