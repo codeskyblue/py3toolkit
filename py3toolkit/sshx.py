@@ -13,6 +13,7 @@ Refs:
 import argparse
 import dataclasses
 import fcntl
+import getpass
 import pathlib
 import pty
 import signal
@@ -41,11 +42,11 @@ def make_field(field_name: str = None,
                mm_field=None,
                decorder: typing.Callable = None,
                default=dataclasses.MISSING,
-               default_factory=dataclasses.MISSING) -> dataclasses.field:
+               default_factory=dataclasses.MISSING, **kwargs) -> dataclasses.field:
     return dataclasses.field(metadata=dconfig(field_name=field_name,
                                               mm_field=mm_field, decoder=decorder),
                              default=default,
-                             default_factory=default_factory)
+                             default_factory=default_factory, **kwargs)
 
 def password_decorder(value: typing.Union[str, int]) -> typing.Optional[str]:
     if value is None:
@@ -83,15 +84,41 @@ class CallbackShell(DataClassJsonMixin):
 
 @dataclass
 class HostConfig(DataClassJsonMixin):
-    name: str
+    name: typing.Optional[str] = None
+    user: typing.Optional[str] = None
     port: int = 22
     host: typing.Optional[str] = None
-    user: typing.Optional[str] = None
     keypath: typing.Optional[str] = None
-    password: typing.Optional[str] = make_field(decorder=password_decorder, default=None)
+    password: typing.Optional[typing.Union[int, str]] = make_field(decorder=password_decorder, default=None)
     callback_shells: typing.Optional[typing.List[CallbackShell]] = make_field(field_name="callback-shells", default=None)
     children: typing.Optional[typing.List["HostConfig"]] = make_field(mm_field=fields.Field(), default=None)
     gateway: typing.Optional["HostConfig"] = make_field(mm_field=fields.Field(), default=None)
+    _parent: typing.Optional["HostConfig"] = make_field(mm_field=fields.Field(), default=None, init=False, repr=False)
+
+    def post_load(self):
+        if self._parent:
+            if not self.user:
+                self.user = self._parent.user
+            if not self.host:
+                self.host = self._parent.host
+            if not self.port:
+                self.port = self._parent.port
+            if not self.keypath:
+                self.keypath = self._parent.keypath
+            if not self.password:
+                self.password = self._parent.password
+            if not self.callback_shells:
+                self.callback_shells = self._parent.callback_shells
+            if not self.gateway:
+                self.gateway = self._parent.gateway
+        
+        if not self.name:
+            self.name = self.host
+        if self.user is None:
+            self.user = getpass.getuser()
+        for child in self.children or []:
+            child._parent = self
+            child.post_load()
 
     def build_cmdargs(self) -> typing.List[str]:
         cmds = ["ssh"]
@@ -210,6 +237,8 @@ class SelectContainer(HSplit):
                 html_text = "  ➤ " + f"<name>{config.name}</name>" + prefix
             else:
                 html_text = "    " + f"<gray>{config.name}</gray>" + prefix
+            if config.children:
+                html_text = f"<b>{html_text}</b>"
             host_windows.append(Window(content=FormattedTextControl(HTML(html_text)), height=1))
         return host_windows
 
@@ -252,20 +281,29 @@ class SelectContainer(HSplit):
         kb.add(Keys.Enter)(self._enter_hook)
 
 
-def load_config(*files: typing.List[str]) -> typing.List[HostConfig]:
-    p = pathlib.Path("~/.sshw.yml").expanduser()
-    return HostConfig.schema().load(yaml.safe_load(p.read_bytes()), many=True)
+def load_config(files: typing.List[str]) -> typing.List[HostConfig]:
+    for file in files:
+        p = pathlib.Path(file).expanduser()
+        if p.exists():
+            host_configs = HostConfig.schema().load(yaml.safe_load(p.read_bytes()), many=True)
+            for config in host_configs:
+                config.post_load()
+            return host_configs
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-v", "--version", action="store_true")
+    parser.add_argument("-c", "--conf", help="config file")
     args = parser.parse_args()
     if args.version:
         print(__version__)
         return
 
-    host_configs = load_config()
+    config_files = ["~/.sshx.yml", "~/.sshx.yaml", "~/.sshw.yml", "~/.sshw.yaml"]
+    if args.conf:
+        config_files = [args.conf]
+    host_configs = load_config(config_files)
     hosts_container = SelectContainer(host_configs) #[mymac, pc001, pc002])
     hosts_container.register_key_bindings(kb)
 
