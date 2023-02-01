@@ -15,6 +15,7 @@ Jinja2 = "^3.1.2"
 dataclasses-json = "^0.5.7"
 pyyaml = "^6.0"
 prompt_toolkit = "*"
+pexpect = "*"
 
 [tool.poetry.scripts]
 gen_supervisor_conf = "py3toolkit.gen_supervisor_conf:main"
