@@ -5,7 +5,10 @@ ssh client wrapper for automatic login.
 
 Add some features
 
-- add ssh connect through gateway ssh server
+- [x] add ssh connect through gateway ssh server
+- [ ] support password-file
+- [ ] support configfile stored in http address
+- [ ] support edit configfile with console dialog
 
 # Config
 config file load in following order
