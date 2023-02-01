@@ -11,12 +11,14 @@ Refs:
 """
 
 import dataclasses
-import yaml
 import pathlib
 import typing
 from dataclasses import dataclass
 
-from dataclasses_json import DataClassJsonMixin, config as dconfig
+import yaml
+from dataclasses_json import DataClassJsonMixin
+from dataclasses_json import config as dconfig
+from marshmallow import fields
 from prompt_toolkit import HTML, Application, print_formatted_text
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
@@ -28,6 +30,22 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.styles import Style
 
 
+def make_field(field_name: str = None,
+               mm_field=None,
+               decorder: typing.Callable = None,
+               default=dataclasses.MISSING,
+               default_factory=dataclasses.MISSING) -> dataclasses.field:
+    return dataclasses.field(metadata=dconfig(field_name=field_name,
+                                              mm_field=mm_field, decoder=decorder),
+                             default=default,
+                             default_factory=default_factory)
+
+def password_decorder(value: typing.Union[str, int]) -> typing.Optional[str]:
+    if value is None:
+        return None
+    return str(value)
+
+
 @dataclass
 class HostConfig(DataClassJsonMixin):
     name: str
@@ -35,15 +53,19 @@ class HostConfig(DataClassJsonMixin):
     host: typing.Optional[str] = None
     user: typing.Optional[str] = None
     keypath: typing.Optional[str] = None
-    password: typing.Optional[typing.Union[str, int]] = None
-    callback_shells: typing.Optional[typing.List[dict]] = dataclasses.field(metadata=dconfig(field_name="callback-shells"), default=None)
-    children: typing.Optional[typing.List["HostConfig"]] = None
+    password: typing.Optional[typing.Union[str, int]] = make_field(decorder=password_decorder, default=None)
+    callback_shells: typing.Optional[typing.List[dict]] = make_field(field_name="callback-shells", default=None)
+    children: typing.Optional[typing.List["HostConfig"]] = make_field(mm_field=fields.Field(), default=None)
 
-    def get_password(self) -> typing.Optional[str]:
-        if self.password is None:
-            return None
-        return str(self.password)
-
+    def build_ssh_cmd(self) -> typing.List[str]:
+        cmds = ["ssh"]
+        if self.port != 22:
+            cmds.extend(["-p", str(self.port)])
+        cmds.extend([f"{self.user}@{self.host}"])
+        if self.password:
+            cmds = ["sshpass", "-p", self.password] + cmds
+        return cmds
+        
 
 # The style sheet.
 style = Style.from_dict({
@@ -72,7 +94,7 @@ class SelectContainer(HSplit):
         self._host_configs = host_configs
         self._active_index = 0
         super().__init__(self._gen_host_windows())
-    
+
     def _gen_host_windows(self):
         host_windows = []
         for index, config in enumerate(self._host_configs):
@@ -87,11 +109,11 @@ class SelectContainer(HSplit):
     def _up_hook(self, event: KeyPressEvent):
         index = self.get_active_index()
         self.set_active_index(index - 1)
-    
+
     def _down_hook(self, event: KeyPressEvent):
         index = self.get_active_index()
         self.set_active_index(index + 1)
-    
+
     def _enter_hook(self, event: KeyPressEvent):
         index = self.get_active_index()
         config = self._host_configs[index]
@@ -104,14 +126,14 @@ class SelectContainer(HSplit):
             self.set_active_index(0)
         else:
             event.app.exit(config)
-    
+
     def get_active_index(self):
         return self._active_index
-    
+
     def set_active_index(self, index):
         self._active_index = index % len(self.children)
         self._update_active()
-    
+
     def _update_active(self):
         self.children = self._gen_host_windows()
 
@@ -146,8 +168,8 @@ test_config = """
 
 def load_config() -> typing.List[HostConfig]:
     p = pathlib.Path("~/.sshw.yml").expanduser()
-    return HostConfig.schema().load(yaml.safe_load(p.read_bytes()), many=True)
-    # return HostConfig.schema().load(yaml.safe_load(test_config), many=True)
+    # return HostConfig.schema().load(yaml.safe_load(p.read_bytes()), many=True)
+    return HostConfig.schema().load(yaml.safe_load(test_config), many=True)
 
 
 def main():
@@ -171,8 +193,8 @@ def main():
         if host_config.port != 22:
             cmds.extend(["-p", str(host_config.port)])
         cmds.extend([f"{host_config.user}@{host_config.host}"])
-        if host_config.get_password():
-            cmds = ["sshpass", "-p", host_config.get_password()] + cmds
+        if host_config.password:
+            cmds = ["sshpass", "-p", host_config.password] + cmds
         print(cmds)
         print(" ".join(cmds))
 
