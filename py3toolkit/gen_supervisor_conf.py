@@ -148,7 +148,7 @@ def main():
 
     p: pathlib.Path = args.config
     if p is None:
-        guess_config_path()
+        p = guess_config_path()
 
     with p.open("rb") as f:
         data = yaml.load(f, yaml.SafeLoader)
