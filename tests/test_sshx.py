@@ -4,7 +4,7 @@
 """Created on Wed Feb 01 2023 14:38:55 by codeskyblue
 """
 
-from py3toolkit.sshw import HostConfig
+from py3toolkit.sshx import HostConfig
 import yaml
 
 test_config = """
